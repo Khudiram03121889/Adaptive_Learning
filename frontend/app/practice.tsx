@@ -9,7 +9,7 @@ import { SessionManager } from '../utils/sessionManager';
 import { PatternEngine } from '../utils/patternEngine';
 import { analyzeError } from '../utils/errorAnalyzer';
 
-const API_URL = 'http://192.168.31.220:8000'; // Should match local network IP
+const API_URL = 'http://10.0.2.2:8000'; // Standard Android Emulator/BlueStacks host IP
 
 export default function PracticeScreen() {
   const router = useRouter();
@@ -259,15 +259,17 @@ export default function PracticeScreen() {
             <Text style={styles.iconLabel}>Play (Hold for Slow)</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity 
-            style={[styles.iconButton, isRecording ? styles.buttonRecording : styles.buttonSecondary]}
-            onPress={handleSpeakPress}
-          >
-            <Text style={styles.iconText}>🎤</Text>
-            <Text style={[styles.iconLabel, isRecording && styles.iconLabelRecording]}>
-              {isRecording ? 'Stop' : 'Speak'}
-            </Text>
-          </TouchableOpacity>
+          {isPronunciationMode && (
+            <TouchableOpacity 
+              style={[styles.iconButton, isRecording ? styles.buttonRecording : styles.buttonSecondary]}
+              onPress={handleSpeakPress}
+            >
+              <Text style={styles.iconText}>🎤</Text>
+              <Text style={[styles.iconLabel, isRecording && styles.iconLabelRecording]}>
+                {isRecording ? 'Stop' : 'Speak'}
+              </Text>
+            </TouchableOpacity>
+          )}
         </View>
 
         {!isPronunciationMode && (

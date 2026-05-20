@@ -8,6 +8,8 @@ from supabase import create_client, Client
 from datetime import datetime
 from openai import OpenAI
 import asyncio
+import threading
+import random
 
 load_dotenv()
 
@@ -71,6 +73,46 @@ user_state = {
     }
 }
 
+def generate_initial_words_sync():
+    global MOCK_100_WORDS
+    if NVIDIA_API_KEY == "dummy-api-key" or not NVIDIA_API_KEY:
+        print("NVIDIA_API_KEY is not set. Using fallback MOCK words.")
+        return
+
+    prompt = """
+    You are an expert AI literacy tutor.
+    Generate a JSON list of exactly 100 spelling/vocabulary words appropriate for a beginner learning to spell.
+    The words should range from easy (3-letter CVC words) to slightly more challenging (vowel teams, digraphs).
+    Return ONLY a JSON array of 100 strings (e.g. ["cat", "dog", ...]). Do not include any other text or markdown.
+    """
+    try:
+        completion = openai_client.chat.completions.create(
+            model="minimaxai/minimax-m2.7",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=2048,
+            stream=False
+        )
+        response_text = completion.choices[0].message.content.strip()
+        if response_text.startswith("```json"):
+            response_text = response_text[7:-3].strip()
+        elif response_text.startswith("```"):
+            response_text = response_text[3:-3].strip()
+            
+        words = json.loads(response_text)
+        if isinstance(words, list) and len(words) >= 50:
+            MOCK_100_WORDS = words
+            user_state["next_words"] = MOCK_100_WORDS[:50]
+            print(f"Successfully generated {len(words)} initial words via AI.")
+    except Exception as e:
+        print(f"Error generating initial words via AI: {e}")
+
+@app.on_event("startup")
+def startup_event():
+    # Run AI generation in a background thread so it doesn't block FastAPI startup
+    thread = threading.Thread(target=generate_initial_words_sync)
+    thread.start()
+
 @app.get("/")
 def read_root():
     return {"message": "Welcome to the Adaptive Literacy App API", "supabase_connected": supabase is not None}
@@ -90,7 +132,8 @@ def background_analyze_and_prepare(session: SessionData):
     Background task to analyze the 50 attempts using Minimax M2.7 and prepare the next 50 words.
     """
     if NVIDIA_API_KEY == "dummy-api-key" or not NVIDIA_API_KEY:
-        print("Error: NVIDIA_API_KEY is not set.")
+        print("Warning: NVIDIA_API_KEY is not set. Using fallback rotation for next words.")
+        user_state["next_words"] = random.sample(MOCK_100_WORDS, min(50, len(MOCK_100_WORDS)))
         return
 
     # Summarize attempts

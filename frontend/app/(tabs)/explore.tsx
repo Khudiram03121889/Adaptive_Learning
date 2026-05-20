@@ -2,7 +2,7 @@ import { View, Text, StyleSheet, ScrollView, SafeAreaView, ActivityIndicator } f
 import { useState, useEffect } from 'react';
 import { useFonts, PlusJakartaSans_400Regular, PlusJakartaSans_600SemiBold, PlusJakartaSans_700Bold, PlusJakartaSans_800ExtraBold, PlusJakartaSans_500Medium } from '@expo-google-fonts/plus-jakarta-sans';
 
-const API_URL = 'http://192.168.31.220:8000'; // Make sure this matches your network IP
+const API_URL = 'http://10.0.2.2:8000'; // Standard Android Emulator/BlueStacks host IP
 
 export default function ExploreScreen() {
   const [fontsLoaded] = useFonts({
