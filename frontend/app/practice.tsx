@@ -1,9 +1,13 @@
 import { View, Text, StyleSheet, TouchableOpacity, TextInput, KeyboardAvoidingView, Platform, ScrollView, ActivityIndicator, Alert } from 'react-native';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
 import { useSpeechRecognitionEvent, ExpoSpeechRecognitionModule } from 'expo-speech-recognition';
 import { useFonts, PlusJakartaSans_400Regular, PlusJakartaSans_500Medium, PlusJakartaSans_600SemiBold, PlusJakartaSans_700Bold, PlusJakartaSans_800ExtraBold } from '@expo-google-fonts/plus-jakarta-sans';
+
+import { SessionManager } from '../utils/sessionManager';
+import { PatternEngine } from '../utils/patternEngine';
+import { analyzeError } from '../utils/errorAnalyzer';
 
 const API_URL = 'http://192.168.31.220:8000'; // Should match local network IP
 
@@ -11,15 +15,19 @@ export default function PracticeScreen() {
   const router = useRouter();
   const { mode } = useLocalSearchParams(); // 'spelling' | 'pronunciation'
   
-  const [words, setWords] = useState([]);
-  const [currentWordIndex, setCurrentWordIndex] = useState(0);
-  const [attempts, setAttempts] = useState([]);
+  const [word, setWord] = useState<string>('');
+  const [attempts, setAttempts] = useState<any[]>([]);
   const [input, setInput] = useState('');
-  const [feedback, setFeedback] = useState(null);
+  const [feedback, setFeedback] = useState<'correct' | 'incorrect' | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRecording, setIsRecording] = useState(false);
   const [startTime, setStartTime] = useState(Date.now());
   const [testComplete, setTestComplete] = useState(false);
+  
+  const [progress, setProgress] = useState({ current: 0, total: 50 });
+
+  const sessionManager = useRef<SessionManager | null>(null);
+  const patternEngine = useRef(new PatternEngine());
 
   const [fontsLoaded] = useFonts({
     PlusJakartaSans_400Regular,
@@ -44,7 +52,6 @@ export default function PracticeScreen() {
 
   useEffect(() => {
     fetchWords();
-    // Stop recording if component unmounts
     return () => {
       ExpoSpeechRecognitionModule.stop();
     };
@@ -55,23 +62,38 @@ export default function PracticeScreen() {
       setIsLoading(true);
       const response = await fetch(`${API_URL}/words?level=1`);
       const data = await response.json();
-      if (data.words && data.words.length > 0) {
-        setWords(data.words);
-      } else {
-        setWords(['Apple', 'Banana', 'Cat']);
-      }
+      let initialWords = data.words && data.words.length > 0 ? data.words : ['Apple', 'Banana', 'Cat'];
+      
+      sessionManager.current = new SessionManager(initialWords);
+      nextWord();
+      
     } catch (error) {
       console.log('Error fetching words:', error);
-      setWords(['Apple', 'Banana', 'Cat']);
+      sessionManager.current = new SessionManager(['Apple', 'Banana', 'Cat']);
+      nextWord();
     } finally {
       setIsLoading(false);
-      setStartTime(Date.now());
     }
   };
 
-  const word = words[currentWordIndex] || '';
+  const nextWord = () => {
+    if (!sessionManager.current) return;
+    
+    const next = sessionManager.current.getNextWord();
+    setProgress(sessionManager.current.getProgress());
+    
+    if (next) {
+      setWord(next);
+      setStartTime(Date.now());
+      setInput('');
+      setFeedback(null);
+    } else {
+      finishTest(attempts);
+    }
+  };
 
   const playWord = (slow = false) => {
+    if (!word) return;
     Speech.speak(word, {
       rate: slow ? 0.4 : 0.9,
       pitch: 1.0,
@@ -90,19 +112,25 @@ export default function PracticeScreen() {
       return;
     }
 
-    // Reset input before starting
     setInput('');
     
     ExpoSpeechRecognitionModule.start({
       lang: 'en-US',
-      interimResults: true, // Show results as they are spoken
+      interimResults: true,
       maxAlternatives: 1,
     });
   };
 
-  const processAttempt = async (userInput, isCorrect) => {
+  const processAttempt = async (userInput: string, isCorrect: boolean) => {
+    if (!sessionManager.current) return;
+
     const timeTaken = Date.now() - startTime;
     setFeedback(isCorrect ? 'correct' : 'incorrect');
+
+    const errorType = analyzeError(word, userInput);
+    if (!isCorrect) {
+      patternEngine.current.updatePattern(errorType);
+    }
 
     const newAttempt = {
       user_id: 'test-user-123',
@@ -110,41 +138,26 @@ export default function PracticeScreen() {
       input: userInput.trim(),
       correct: isCorrect,
       time_taken: timeTaken,
-      pattern: null
+      pattern: errorType === 'none' ? null : errorType
     };
 
     const newAttemptsArray = [...attempts, newAttempt];
     setAttempts(newAttemptsArray);
 
+    sessionManager.current.recordAttempt(word, isCorrect);
+
     if (isCorrect) {
       setTimeout(() => {
-        setFeedback(null);
-        setInput('');
-        
-        if (currentWordIndex + 1 >= words.length) {
-          finishTest(newAttemptsArray);
-        } else {
-          setStartTime(Date.now());
-          setCurrentWordIndex((prev) => prev + 1);
-        }
+        nextWord();
       }, 1500);
     } else {
-      setTimeout(() => setFeedback(null), 2000);
-      
       setTimeout(() => {
-        setInput('');
-        if (currentWordIndex + 1 >= words.length) {
-          finishTest(newAttemptsArray);
-        } else {
-          setStartTime(Date.now());
-          setCurrentWordIndex((prev) => prev + 1);
-        }
-      }, 2000);
+        nextWord();
+      }, 2500);
     }
   };
 
   const submitAttempt = () => {
-    // If still recording, stop it
     if (isRecording) {
       ExpoSpeechRecognitionModule.stop();
     }
@@ -153,7 +166,7 @@ export default function PracticeScreen() {
     processAttempt(input, isCorrect);
   };
 
-  const finishTest = async (finalAttempts) => {
+  const finishTest = async (finalAttempts: any[]) => {
     setTestComplete(true);
     try {
       await fetch(`${API_URL}/submit-test`, {
@@ -182,7 +195,7 @@ export default function PracticeScreen() {
       <View style={[styles.container, { justifyContent: 'center', alignItems: 'center', padding: 24 }]}>
         <Text style={{ fontFamily: 'PlusJakartaSans_800ExtraBold', fontSize: 24, textAlign: 'center', marginBottom: 16 }}>Test Complete! 🎉</Text>
         <Text style={{ fontFamily: 'PlusJakartaSans_500Medium', fontSize: 16, textAlign: 'center', color: '#64748B', marginBottom: 32 }}>
-          Your 50 words have been submitted to the AI for analysis. The next batch of words is being prepared to target your weaknesses!
+          Your session has been submitted to the AI for analysis. The next batch of words will target your specific weaknesses!
         </Text>
         <TouchableOpacity 
           style={styles.submitButton} 
@@ -209,7 +222,7 @@ export default function PracticeScreen() {
           <Text style={styles.modeTitle}>
             {mode === 'spelling' ? 'Spelling Mode' : 'Pronunciation Mode'}
           </Text>
-          <Text style={styles.progressCounter}>{currentWordIndex + 1}/{words.length}</Text>
+          <Text style={styles.progressCounter}>{progress.current}/{progress.total}</Text>
         </View>
 
         {feedback === 'correct' && (
@@ -228,6 +241,7 @@ export default function PracticeScreen() {
             {isPronunciationMode ? word : (feedback === 'incorrect' || input.length > 0 ? word : '_____')}
           </Text>
           {isPronunciationMode && <Text style={styles.wordSubtitle}>Read this word out loud</Text>}
+          {!isPronunciationMode && <Text style={styles.wordSubtitle}>Listen and type</Text>}
           {isPronunciationMode && input.length > 0 && (
             <Text style={{marginTop: 8, color: '#3B82F6', fontFamily: 'PlusJakartaSans_600SemiBold'}}>
               Heard: "{input}"
@@ -242,7 +256,7 @@ export default function PracticeScreen() {
             onLongPress={() => playWord(true)}
           >
             <Text style={styles.iconText}>🔊</Text>
-            <Text style={styles.iconLabel}>Play</Text>
+            <Text style={styles.iconLabel}>Play (Hold for Slow)</Text>
           </TouchableOpacity>
 
           <TouchableOpacity 
@@ -262,18 +276,19 @@ export default function PracticeScreen() {
               style={styles.input}
               value={input}
               onChangeText={setInput}
-              placeholder="Type or speak the word"
+              placeholder="Type the word here"
               placeholderTextColor="#94A3B8"
               autoCapitalize="none"
               autoCorrect={false}
+              editable={feedback === null}
             />
           </View>
         )}
 
         <TouchableOpacity 
-          style={[styles.submitButton, (!input) && styles.submitButtonDisabled]} 
+          style={[styles.submitButton, (!input || feedback !== null) && styles.submitButtonDisabled]} 
           onPress={submitAttempt}
-          disabled={!input}
+          disabled={!input || feedback !== null}
         >
           <Text style={styles.submitButtonText}>
             {isPronunciationMode ? 'Check Pronunciation' : 'Submit'}
@@ -298,13 +313,13 @@ const styles = StyleSheet.create({
   toastText: { color: '#FFF', fontFamily: 'PlusJakartaSans_700Bold', fontSize: 16 },
   wordContainer: { marginBottom: 48, alignItems: 'center', justifyContent: 'center', minHeight: 160, width: '100%', backgroundColor: '#FFF', borderRadius: 24, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.05, shadowRadius: 12, elevation: 2, padding: 20 },
   wordText: { fontFamily: 'PlusJakartaSans_800ExtraBold', fontSize: 48, color: '#1E293B', letterSpacing: 2, textAlign: 'center' },
-  wordSubtitle: { marginTop: 12, fontFamily: 'PlusJakartaSans_500Medium', fontSize: 16, color: '#64748B' },
+  wordSubtitle: { marginTop: 12, fontFamily: 'PlusJakartaSans_500Medium', fontSize: 16, color: '#64748B', textAlign: 'center' },
   actionRow: { flexDirection: 'row', justifyContent: 'center', gap: 24, marginBottom: 48, width: '100%' },
   iconButton: { alignItems: 'center', justifyContent: 'center', width: 110, height: 110, borderRadius: 24, backgroundColor: '#FFF', shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.05, shadowRadius: 8, elevation: 2 },
   buttonSecondary: { borderWidth: 2, borderColor: '#E2E8F0' },
   buttonRecording: { borderWidth: 2, borderColor: '#EF4444', backgroundColor: '#FEF2F2' },
   iconText: { fontSize: 32, marginBottom: 8 },
-  iconLabel: { fontFamily: 'PlusJakartaSans_600SemiBold', color: '#64748B', fontSize: 14 },
+  iconLabel: { fontFamily: 'PlusJakartaSans_600SemiBold', color: '#64748B', fontSize: 12, textAlign: 'center' },
   iconLabelRecording: { color: '#EF4444' },
   inputContainer: { width: '100%', marginBottom: 32 },
   input: { backgroundColor: '#FFF', borderWidth: 2, borderColor: '#3B82F6', borderRadius: 16, padding: 20, fontSize: 24, fontFamily: 'PlusJakartaSans_700Bold', color: '#1E293B', textAlign: 'center', shadowColor: '#3B82F6', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 4, elevation: 2 },

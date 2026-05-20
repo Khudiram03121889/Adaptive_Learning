@@ -66,7 +66,8 @@ user_state = {
     "latest_analysis": {
         "mastery_percentage": 0,
         "mastered_words": [],
-        "patterns_to_practice": []
+        "patterns_to_practice": [],
+        "recent_errors": []
     }
 }
 
@@ -175,6 +176,15 @@ def submit_test(session: SessionData, background_tasks: BackgroundTasks):
     Submits a completed 50-word test.
     Triggers AI analysis in the background to not block the frontend.
     """
+    # Aggregate raw errors synchronously so they are available immediately
+    error_counts = {}
+    for a in session.attempts:
+        if not a.correct and a.pattern and a.pattern != "none":
+            error_counts[a.pattern] = error_counts.get(a.pattern, 0) + 1
+            
+    recent_errors = [{"type": k, "count": v} for k, v in sorted(error_counts.items(), key=lambda item: item[1], reverse=True)]
+    user_state["latest_analysis"]["recent_errors"] = recent_errors
+    
     # Trigger AI background task
     background_tasks.add_task(background_analyze_and_prepare, session)
     

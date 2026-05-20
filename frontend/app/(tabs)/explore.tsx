@@ -13,7 +13,7 @@ export default function ExploreScreen() {
     PlusJakartaSans_800ExtraBold,
   });
 
-  const [exploreData, setExploreData] = useState(null);
+  const [exploreData, setExploreData] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
@@ -41,9 +41,10 @@ export default function ExploreScreen() {
     );
   }
 
-  const masteryPercentage = exploreData?.mastery_percentage || 0;
-  const masteredWords = exploreData?.mastered_words || [];
-  const patternsToPractice = exploreData?.patterns_to_practice || [];
+  const masteryPercentage: number = exploreData?.mastery_percentage || 0;
+  const masteredWords: string[] = exploreData?.mastered_words || [];
+  const patternsToPractice: any[] = exploreData?.patterns_to_practice || [];
+  const recentErrors: any[] = exploreData?.recent_errors || [];
 
   return (
     <SafeAreaView style={styles.container}>
@@ -84,7 +85,7 @@ export default function ExploreScreen() {
           <Text style={styles.sectionTitle}>AI Analysis: Needs Practice</Text>
           
           {patternsToPractice.length > 0 ? (
-            patternsToPractice.map((pattern, idx) => (
+            patternsToPractice.map((pattern: any, idx: number) => (
               <View key={idx} style={styles.patternCard}>
                 <View style={styles.patternHeader}>
                   <Text style={styles.patternIcon}>🎯</Text>
@@ -101,9 +102,28 @@ export default function ExploreScreen() {
             <View style={[styles.patternCard, { borderColor: '#3B82F6', backgroundColor: '#EBF3FF' }]}>
               <Text style={[styles.patternTitle, { color: '#1E3A8A' }]}>No patterns detected yet!</Text>
               <Text style={[styles.patternDesc, { color: '#1E3A8A', marginTop: 8, marginBottom: 0 }]}>
-                Complete a 50-word test to let the AI analyze your weak areas.
+                Complete a test to let the AI analyze your weak areas.
               </Text>
             </View>
+          )}
+        </View>
+
+        {/* Local Error Analysis Section */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Recent Mistakes By Type</Text>
+          {recentErrors.length > 0 ? (
+            recentErrors.map((err: any, idx: number) => (
+              <View key={idx} style={styles.errorRow}>
+                <Text style={styles.errorTypeLabel}>
+                  {err.type.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase())}
+                </Text>
+                <View style={styles.errorCountBadge}>
+                  <Text style={styles.errorCountText}>{err.count}</Text>
+                </View>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.emptyText}>No recent local error data available.</Text>
           )}
         </View>
 
@@ -250,5 +270,37 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#004B1E',
     textAlign: 'right',
+  },
+  errorRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#FFF',
+    padding: 16,
+    borderRadius: 12,
+    marginBottom: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 1,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  errorTypeLabel: {
+    fontFamily: 'PlusJakartaSans_600SemiBold',
+    fontSize: 16,
+    color: '#334155',
+  },
+  errorCountBadge: {
+    backgroundColor: '#FEE2E2',
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 100,
+  },
+  errorCountText: {
+    fontFamily: 'PlusJakartaSans_800ExtraBold',
+    fontSize: 14,
+    color: '#EF4444',
   }
 });
