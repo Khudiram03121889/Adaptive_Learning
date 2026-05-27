@@ -1,10 +1,35 @@
-import { View, Text, StyleSheet, ScrollView, SafeAreaView, ActivityIndicator } from 'react-native';
-import { useState, useEffect } from 'react';
+import { View, Text, StyleSheet, ScrollView, SafeAreaView, ActivityIndicator, Platform } from 'react-native';
+import { useState, useCallback, useEffect } from 'react';
 import { useFonts, PlusJakartaSans_400Regular, PlusJakartaSans_600SemiBold, PlusJakartaSans_700Bold, PlusJakartaSans_800ExtraBold, PlusJakartaSans_500Medium } from '@expo-google-fonts/plus-jakarta-sans';
+import { useRouter, useFocusEffect } from 'expo-router';
+import Constants from 'expo-constants';
+import { LocalStorageManager, Student, StudentAttempt } from '../../utils/localStorageManager';
 
-const API_URL = 'http://10.0.2.2:8000'; // Standard Android Emulator/BlueStacks host IP
+
+const getApiUrl = () => {
+  if (Platform.OS === 'web') return 'http://localhost:8000';
+  const hostUri = Constants.expoConfig?.hostUri;
+  if (hostUri) {
+    const ip = hostUri.split(':')[0];
+    return `http://${ip}:8000`;
+  }
+  return 'http://10.0.2.2:8000';
+};
+
+const API_URL = getApiUrl();
+
+const getLevelName = (lvl: number) => {
+  if (lvl === 1) return "Level 1: Beginner CVC Words";
+  if (lvl === 2) return "Level 2: Simple Blends & Digraphs";
+  if (lvl === 3) return "Level 3: Vowel Teams & Multi-Syllabic";
+  return `Level ${lvl}: Advanced Words`;
+};
+
 
 export default function ExploreScreen() {
+  const router = useRouter();
+  const [activeStudent, setActiveStudent] = useState<Student | null>(null);
+  
   const [fontsLoaded] = useFonts({
     PlusJakartaSans_400Regular,
     PlusJakartaSans_500Medium,
@@ -16,20 +41,135 @@ export default function ExploreScreen() {
   const [exploreData, setExploreData] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => {
-    fetchExploreData();
-  }, []);
+  useFocusEffect(
+    useCallback(() => {
+      const initialize = async () => {
+        const student = await LocalStorageManager.getActiveStudent();
+        if (!student) {
+          router.replace('/login');
+          return;
+        }
+        setActiveStudent(student);
+        await fetchExploreData(student);
+      };
+      initialize();
+    }, [])
+  );
 
-  const fetchExploreData = async () => {
+  const fetchExploreData = async (student: Student) => {
     try {
       setIsLoading(true);
-      const response = await fetch(`${API_URL}/explore-data`);
+      const response = await fetch(`${API_URL}/explore-data?user_id=${student.id}`);
+      if (!response.ok) {
+        throw new Error('Server responded with error');
+      }
       const data = await response.json();
-      setExploreData(data);
+      setExploreData({
+        ...data,
+        level: data.level || student.level
+      });
     } catch (error) {
-      console.log('Error fetching explore data:', error);
+      console.log('Error fetching explore data from server, using local fallback:', error);
+      await loadLocalAnalytics(student);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const loadLocalAnalytics = async (student: Student) => {
+    try {
+      const attempts = await LocalStorageManager.getAttempts(student.id);
+      
+      if (!attempts || attempts.length === 0) {
+        setExploreData({
+          mastery_percentage: 0,
+          level: student.level,
+          mastered_words: [],
+          patterns_to_practice: [
+            {
+              title: "Getting Started",
+              description: "Complete your first spelling or pronunciation test to begin analyzing patterns!",
+              mastery_progress: 0
+            }
+          ],
+          recent_errors_spelling: [],
+          recent_errors_pronunciation: []
+        });
+        return;
+      }
+
+      // Calculate overall mastery of the last 50 attempts
+      const recentAttempts = attempts.slice(-50);
+      const correctCount = recentAttempts.filter(a => a.correct).length;
+      const masteryPercentage = Math.round((correctCount / recentAttempts.length) * 100);
+
+      // Get recently mastered words (last 10 unique correct words)
+      const correctWords = attempts
+        .filter(a => a.correct)
+        .map(a => a.word);
+      const masteredWords = Array.from(new Set(correctWords)).slice(-10).reverse();
+
+      // Split spelling and pronunciation errors
+      const errorCountsSpelling: { [key: string]: number } = {};
+      const errorCountsPronunciation: { [key: string]: number } = {};
+
+      attempts.forEach(a => {
+        if (!a.correct && a.pattern && a.pattern !== 'none') {
+          const mode = a.mode || 'spelling';
+          if (mode === 'pronunciation') {
+            errorCountsPronunciation[a.pattern] = (errorCountsPronunciation[a.pattern] || 0) + 1;
+          } else {
+            errorCountsSpelling[a.pattern] = (errorCountsSpelling[a.pattern] || 0) + 1;
+          }
+        }
+      });
+
+      const recentErrorsSpelling = Object.entries(errorCountsSpelling)
+        .map(([type, count]) => ({ type, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 5);
+
+      const recentErrorsPronunciation = Object.entries(errorCountsPronunciation)
+        .map(([type, count]) => ({ type, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 5);
+
+      const patternsToPractice: any[] = [];
+      const allErrorsSorted = [
+        ...recentErrorsSpelling.map(e => ({ ...e, mode: 'Spelling' })),
+        ...recentErrorsPronunciation.map(e => ({ ...e, mode: 'Pronunciation' }))
+      ].sort((a, b) => b.count - a.count);
+
+      if (allErrorsSorted.length > 0) {
+        allErrorsSorted.slice(0, 2).forEach(err => {
+          const readableType = err.type
+            .replace(/_/g, ' ')
+            .replace(/\b\w/g, (c: string) => c.toUpperCase());
+          
+          patternsToPractice.push({
+            title: `${readableType} (${err.mode})`,
+            description: `You made ${err.count} mistake(s) related to this phonetic pattern. Focus on words containing this pattern.`,
+            mastery_progress: Math.max(10, 100 - (err.count * 15))
+          });
+        });
+      } else {
+        patternsToPractice.push({
+          title: "Pattern Mastery",
+          description: "Splendid job! No persistent spelling or pronunciation issues detected so far.",
+          mastery_progress: 100
+        });
+      }
+
+      setExploreData({
+        mastery_percentage: masteryPercentage,
+        level: student.level,
+        mastered_words: masteredWords,
+        patterns_to_practice: patternsToPractice,
+        recent_errors_spelling: recentErrorsSpelling,
+        recent_errors_pronunciation: recentErrorsPronunciation
+      });
+    } catch (e) {
+      console.log('Error calculating local analytics:', e);
     }
   };
 
@@ -42,9 +182,11 @@ export default function ExploreScreen() {
   }
 
   const masteryPercentage: number = exploreData?.mastery_percentage || 0;
+  const level: number = exploreData?.level || 1;
   const masteredWords: string[] = exploreData?.mastered_words || [];
   const patternsToPractice: any[] = exploreData?.patterns_to_practice || [];
-  const recentErrors: any[] = exploreData?.recent_errors || [];
+  const recentErrorsSpelling: any[] = exploreData?.recent_errors_spelling || [];
+  const recentErrorsPronunciation: any[] = exploreData?.recent_errors_pronunciation || [];
 
   return (
     <SafeAreaView style={styles.container}>
@@ -60,6 +202,9 @@ export default function ExploreScreen() {
                 <Text style={styles.progressLabel}>Mastery</Text>
               </View>
             </View>
+            <Text style={{ fontFamily: 'PlusJakartaSans_800ExtraBold', fontSize: 18, color: '#1E293B', marginTop: 24, textAlign: 'center' }}>
+              {getLevelName(level)}
+            </Text>
           </View>
         </View>
 
@@ -111,9 +256,13 @@ export default function ExploreScreen() {
         {/* Local Error Analysis Section */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Recent Mistakes By Type</Text>
-          {recentErrors.length > 0 ? (
-            recentErrors.map((err: any, idx: number) => (
-              <View key={idx} style={styles.errorRow}>
+          
+          <Text style={{ fontFamily: 'PlusJakartaSans_700Bold', fontSize: 18, color: '#1E293B', marginBottom: 12, marginTop: 8 }}>
+            Spelling Mode (Typing)
+          </Text>
+          {recentErrorsSpelling.length > 0 ? (
+            recentErrorsSpelling.map((err: any, idx: number) => (
+              <View key={`spell-${idx}`} style={styles.errorRow}>
                 <Text style={styles.errorTypeLabel}>
                   {err.type.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase())}
                 </Text>
@@ -123,9 +272,28 @@ export default function ExploreScreen() {
               </View>
             ))
           ) : (
-            <Text style={styles.emptyText}>No recent local error data available.</Text>
+            <Text style={[styles.emptyText, { marginBottom: 20 }]}>No recent spelling mistakes.</Text>
+          )}
+
+          <Text style={{ fontFamily: 'PlusJakartaSans_700Bold', fontSize: 18, color: '#1E293B', marginBottom: 12, marginTop: 16 }}>
+            Pronunciation Mode (Speaking)
+          </Text>
+          {recentErrorsPronunciation.length > 0 ? (
+            recentErrorsPronunciation.map((err: any, idx: number) => (
+              <View key={`pron-${idx}`} style={styles.errorRow}>
+                <Text style={styles.errorTypeLabel}>
+                  {err.type.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase())}
+                </Text>
+                <View style={styles.errorCountBadge}>
+                  <Text style={styles.errorCountText}>{err.count}</Text>
+                </View>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.emptyText}>No recent pronunciation mistakes.</Text>
           )}
         </View>
+
 
       </ScrollView>
     </SafeAreaView>

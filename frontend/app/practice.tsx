@@ -1,21 +1,73 @@
-import { View, Text, StyleSheet, TouchableOpacity, TextInput, KeyboardAvoidingView, Platform, ScrollView, ActivityIndicator, Alert } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, TextInput, KeyboardAvoidingView, Platform, ScrollView, ActivityIndicator, Alert, AppState, AppStateStatus } from 'react-native';
 import { useState, useEffect, useRef } from 'react';
+
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
 import { useSpeechRecognitionEvent, ExpoSpeechRecognitionModule } from 'expo-speech-recognition';
 import { useFonts, PlusJakartaSans_400Regular, PlusJakartaSans_500Medium, PlusJakartaSans_600SemiBold, PlusJakartaSans_700Bold, PlusJakartaSans_800ExtraBold } from '@expo-google-fonts/plus-jakarta-sans';
+import Constants from 'expo-constants';
 
 import { SessionManager } from '../utils/sessionManager';
 import { PatternEngine } from '../utils/patternEngine';
 import { analyzeError } from '../utils/errorAnalyzer';
+import { LocalStorageManager, Student, StudentAttempt } from '../utils/localStorageManager';
 
-const API_URL = 'http://10.0.2.2:8000'; // Standard Android Emulator/BlueStacks host IP
+
+const getApiUrl = () => {
+  if (Platform.OS === 'web') {
+    return 'http://localhost:8000';
+  }
+  const hostUri = Constants.expoConfig?.hostUri;
+  if (hostUri) {
+    const ip = hostUri.split(':')[0];
+    return `http://${ip}:8000`;
+  }
+  return 'http://10.0.2.2:8000';
+};
+
+const API_URL = getApiUrl();
+
+const OFFLINE_WORD_POOL: { [key: number]: string[] } = {
+  1: [
+    "cat", "dog", "bat", "rat", "mat", "hat", "fat", "pat", "sat", "vat",
+    "pen", "hen", "men", "ten", "den", "zen", "net", "pet", "set", "wet",
+    "pig", "dig", "fig", "wig", "rig", "big", "jig", "zip", "lip", "tip",
+    "hop", "mop", "pop", "top", "cop", "box", "fox", "pox", "boy", "toy",
+    "sun", "run", "bun", "fun", "gun", "nut", "cut", "hut", "gut", "but"
+  ],
+  2: [
+    "ship", "shop", "shot", "shut", "shed", "shell", "shock", "shin", "chin", "chop",
+    "chat", "chip", "chill", "chug", "chum", "thin", "thick", "that", "this", "them",
+    "then", "path", "math", "bath", "moth", "fish", "dish", "wish", "rush", "dash",
+    "mash", "cash", "gash", "hash", "lash", "rash", "sash", "bash", "bell", "fell"
+  ],
+  3: [
+    "tell", "sell", "well", "yell", "hill", "mill", "pill", "will", "fill", "bill",
+    "train", "brain", "chain", "plain", "rain", "boat", "goat", "coat", "float", "road",
+    "soap", "toad", "blue", "clue", "glue", "true", "play", "clay", "gray", "stay",
+    "help", "held", "melt", "belt", "hand", "band", "sand", "land", "wind", "find"
+  ]
+};
+
+const cleanWord = (str: string) => {
+  return str
+    .toLowerCase()
+    .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+};
+
 
 export default function PracticeScreen() {
   const router = useRouter();
   const { mode } = useLocalSearchParams(); // 'spelling' | 'pronunciation'
   
+  const [level, setLevel] = useState<number>(1);
+  const [activeStudent, setActiveStudent] = useState<Student | null>(null);
+  const [indianVoice, setIndianVoice] = useState<string | undefined>(undefined);
   const [word, setWord] = useState<string>('');
+
+
   const [attempts, setAttempts] = useState<any[]>([]);
   const [input, setInput] = useState('');
   const [feedback, setFeedback] = useState<'correct' | 'incorrect' | null>(null);
@@ -51,30 +103,98 @@ export default function PracticeScreen() {
   });
 
   useEffect(() => {
-    fetchWords();
+    const initialize = async () => {
+      const student = await LocalStorageManager.getActiveStudent();
+      if (!student) {
+        Alert.alert('Login Required', 'Please choose a profile to begin.', [
+          { text: 'OK', onPress: () => router.replace('/login') }
+        ]);
+        return;
+      }
+      setActiveStudent(student);
+      setLevel(student.level);
+      await fetchWords(student.id, student.level);
+    };
+    initialize();
+
+    // Query and cache the Indian English voice
+    const loadVoices = async () => {
+      try {
+        const voices = await Speech.getVoicesAsync();
+        const inVoice = voices.find(v => 
+          v.language.toLowerCase().replace('_', '-').startsWith('en-in')
+        );
+        if (inVoice) {
+          setIndianVoice(inVoice.identifier);
+          console.log('Selected Indian Voice:', inVoice.name, inVoice.identifier);
+        }
+      } catch (err) {
+        console.log('Error loading voices:', err);
+      }
+    };
+    loadVoices();
+
     return () => {
       ExpoSpeechRecognitionModule.stop();
     };
   }, []);
 
-  const fetchWords = async () => {
+  useEffect(() => {
+    const handleAppStateChange = (nextAppState: AppStateStatus) => {
+      if (nextAppState === 'inactive' || nextAppState === 'background') {
+        Alert.alert(
+          "Session Reset ⚠️",
+          "Leaving the app during a spelling or pronunciation session is not allowed. Your progress has been reset.",
+          [{ text: "Back to Home", onPress: () => router.replace('/(tabs)/index') }]
+        );
+      }
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    return () => {
+      subscription.remove();
+    };
+  }, []);
+
+  const fetchWords = async (studentId: string, currentLevel: number) => {
     try {
       setIsLoading(true);
-      const response = await fetch(`${API_URL}/words?level=1`);
+      const response = await fetch(`${API_URL}/words?level=${currentLevel}&user_id=${studentId}`);
       const data = await response.json();
-      let initialWords = data.words && data.words.length > 0 ? data.words : ['Apple', 'Banana', 'Cat'];
       
+      let initialWords = data.words && data.words.length > 0 ? data.words : null;
+      
+      if (!initialWords) {
+        const cached = await LocalStorageManager.getCachedStudentWords(studentId);
+        if (cached && cached.length > 0) {
+          initialWords = cached;
+          console.log('Using locally cached next 50 words.');
+        }
+      }
+      
+      if (!initialWords) {
+        initialWords = OFFLINE_WORD_POOL[currentLevel] || OFFLINE_WORD_POOL[1];
+      }
+      
+      setLevel(data.level || currentLevel);
       sessionManager.current = new SessionManager(initialWords);
       nextWord();
       
     } catch (error) {
-      console.log('Error fetching words:', error);
-      sessionManager.current = new SessionManager(['Apple', 'Banana', 'Cat']);
+      console.log('Error fetching words from server:', error);
+      let initialWords = await LocalStorageManager.getCachedStudentWords(studentId);
+      if (!initialWords || initialWords.length === 0) {
+        initialWords = OFFLINE_WORD_POOL[currentLevel] || OFFLINE_WORD_POOL[1];
+      }
+      sessionManager.current = new SessionManager(initialWords);
       nextWord();
     } finally {
       setIsLoading(false);
     }
   };
+
+
+
 
   const nextWord = () => {
     if (!sessionManager.current) return;
@@ -95,10 +215,13 @@ export default function PracticeScreen() {
   const playWord = (slow = false) => {
     if (!word) return;
     Speech.speak(word, {
-      rate: slow ? 0.4 : 0.9,
+      language: 'en-IN',
+      voice: indianVoice,
+      rate: slow ? 0.45 : 0.82, // Decelerated rate for high clarity
       pitch: 1.0,
     });
   };
+
 
   const handleSpeakPress = async () => {
     if (isRecording) {
@@ -133,52 +256,74 @@ export default function PracticeScreen() {
     }
 
     const newAttempt = {
-      user_id: 'test-user-123',
+      user_id: activeStudent?.id || 'test-user-123',
       word: word,
       input: userInput.trim(),
       correct: isCorrect,
       time_taken: timeTaken,
-      pattern: errorType === 'none' ? null : errorType
+      pattern: errorType === 'none' ? null : errorType,
+      mode: mode || 'spelling'
     };
 
     const newAttemptsArray = [...attempts, newAttempt];
     setAttempts(newAttemptsArray);
 
     sessionManager.current.recordAttempt(word, isCorrect);
-
-    if (isCorrect) {
-      setTimeout(() => {
-        nextWord();
-      }, 1500);
-    } else {
-      setTimeout(() => {
-        nextWord();
-      }, 2500);
-    }
   };
+
 
   const submitAttempt = () => {
     if (isRecording) {
       ExpoSpeechRecognitionModule.stop();
     }
     
-    const isCorrect = input.toLowerCase().trim() === word.toLowerCase();
+    const isCorrect = cleanWord(input) === cleanWord(word);
     processAttempt(input, isCorrect);
   };
 
   const finishTest = async (finalAttempts: any[]) => {
     setTestComplete(true);
+    
+    const studentId = activeStudent?.id || 'test-user-123';
+    
+    // Calculate local offline mastery and progress the student
+    const correctAttempts = finalAttempts.filter(a => a.correct).length;
+    const totalQuestions = finalAttempts.length || 50;
+    const masteryPercentage = Math.round((correctAttempts / totalQuestions) * 100);
+    const passed = masteryPercentage >= 85;
+
+    // Save attempts locally to phone
+    if (activeStudent) {
+      const studentAttempts: StudentAttempt[] = finalAttempts.map(a => ({
+        studentId: studentId,
+        word: a.word,
+        input: a.input,
+        correct: a.correct,
+        timeTaken: a.time_taken,
+        pattern: a.pattern,
+        mode: a.mode,
+        timestamp: new Date().toISOString()
+      }));
+      await LocalStorageManager.saveAttempts(studentId, studentAttempts);
+      
+      if (passed) {
+        await LocalStorageManager.updateStudentLevel(studentId, activeStudent.level + 1);
+        console.log(`Student ${activeStudent.name} progressed to Level ${activeStudent.level + 1}`);
+      }
+    }
+
     try {
       await fetch(`${API_URL}/submit-test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          user_id: 'test-user-123',
-          attempts: finalAttempts
+          user_id: studentId,
+          attempts: finalAttempts,
+          level: level
         })
       });
     } catch (error) {
-      console.log('Error submitting test:', error);
+      console.log('Error submitting test to server:', error);
     }
   };
 
@@ -208,6 +353,7 @@ export default function PracticeScreen() {
   }
 
   const isPronunciationMode = mode === 'pronunciation';
+  const isPlayDisabled = isPronunciationMode && feedback === null;
 
   return (
     <KeyboardAvoidingView 
@@ -238,7 +384,7 @@ export default function PracticeScreen() {
 
         <View style={styles.wordContainer}>
           <Text style={styles.wordText}>
-            {isPronunciationMode ? word : (feedback === 'incorrect' || input.length > 0 ? word : '_____')}
+            {isPronunciationMode ? word : (feedback !== null ? word : word.split('').map(() => '_').join(' '))}
           </Text>
           {isPronunciationMode && <Text style={styles.wordSubtitle}>Read this word out loud</Text>}
           {!isPronunciationMode && <Text style={styles.wordSubtitle}>Listen and type</Text>}
@@ -251,11 +397,16 @@ export default function PracticeScreen() {
 
         <View style={styles.actionRow}>
           <TouchableOpacity 
-            style={[styles.iconButton, styles.buttonSecondary]} 
+            style={[
+              styles.iconButton, 
+              styles.buttonSecondary,
+              isPlayDisabled && { opacity: 0.5, borderColor: '#CBD5E1', backgroundColor: '#F1F5F9' }
+            ]} 
             onPress={() => playWord(false)}
             onLongPress={() => playWord(true)}
+            disabled={isPlayDisabled}
           >
-            <Text style={styles.iconText}>🔊</Text>
+            <Text style={[styles.iconText, isPlayDisabled && { opacity: 0.5 }]}>🔊</Text>
             <Text style={styles.iconLabel}>Play (Hold for Slow)</Text>
           </TouchableOpacity>
 
@@ -282,24 +433,31 @@ export default function PracticeScreen() {
               placeholderTextColor="#94A3B8"
               autoCapitalize="none"
               autoCorrect={false}
+              autoComplete="off"
+              keyboardType="visible-password"
               editable={feedback === null}
             />
           </View>
         )}
 
         <TouchableOpacity 
-          style={[styles.submitButton, (!input || feedback !== null) && styles.submitButtonDisabled]} 
-          onPress={submitAttempt}
-          disabled={!input || feedback !== null}
+          style={[
+            styles.submitButton, 
+            feedback === null && !input && styles.submitButtonDisabled,
+            feedback !== null && { backgroundColor: '#3B82F6', shadowColor: '#3B82F6' }
+          ]} 
+          onPress={feedback !== null ? nextWord : submitAttempt}
+          disabled={feedback === null && !input}
         >
           <Text style={styles.submitButtonText}>
-            {isPronunciationMode ? 'Check Pronunciation' : 'Submit'}
+            {feedback !== null ? 'Next Word →' : (isPronunciationMode ? 'Check Pronunciation' : 'Submit')}
           </Text>
         </TouchableOpacity>
       </ScrollView>
     </KeyboardAvoidingView>
   );
 }
+
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F8FAFC' },
