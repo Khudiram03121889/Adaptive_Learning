@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'react';
 
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
+import { Audio } from 'expo-av';
 import { useSpeechRecognitionEvent, ExpoSpeechRecognitionModule } from 'expo-speech-recognition';
 import { useFonts, PlusJakartaSans_400Regular, PlusJakartaSans_500Medium, PlusJakartaSans_600SemiBold, PlusJakartaSans_700Bold, PlusJakartaSans_800ExtraBold } from '@expo-google-fonts/plus-jakarta-sans';
 import Constants from 'expo-constants';
@@ -238,14 +239,33 @@ export default function PracticeScreen() {
     }
   };
 
-  const playWord = (slow = false) => {
+  const playWord = async (slow = false) => {
     if (!word) return;
-    Speech.speak(word, {
-      language: 'en-IN',
-      voice: indianVoice,
-      rate: slow ? 0.45 : 0.82, // Decelerated rate for high clarity
-      pitch: 1.0,
-    });
+    try {
+      const url = `https://translate.google.com/translate_tts?ie=UTF-8&tl=en-IN&client=tw-ob&q=${encodeURIComponent(word)}`;
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: url },
+        { 
+          shouldPlay: true,
+          rate: slow ? 0.55 : 0.82, // High-clarity custom speeds
+          shouldCorrectPitch: true
+        }
+      );
+      
+      sound.setOnPlaybackStatusUpdate((status) => {
+        if (status.isLoaded && status.didJustFinish) {
+          sound.unloadAsync();
+        }
+      });
+    } catch (error) {
+      console.log('Error streaming premium TTS, using native system voice pack:', error);
+      Speech.speak(word, {
+        language: 'en-IN',
+        voice: indianVoice,
+        rate: slow ? 0.45 : 0.82,
+        pitch: 1.0,
+      });
+    }
   };
 
 
