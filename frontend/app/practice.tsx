@@ -65,6 +65,7 @@ export default function PracticeScreen() {
   const [level, setLevel] = useState<number>(1);
   const [activeStudent, setActiveStudent] = useState<Student | null>(null);
   const [indianVoice, setIndianVoice] = useState<string | undefined>(undefined);
+  const [isIndianVoiceAvailable, setIsIndianVoiceAvailable] = useState<boolean>(true);
   const [word, setWord] = useState<string>('');
 
 
@@ -117,19 +118,44 @@ export default function PracticeScreen() {
     };
     initialize();
 
-    // Query and cache the Indian English voice
+    // Robust retry voice loader
     const loadVoices = async () => {
-      try {
-        const voices = await Speech.getVoicesAsync();
-        const inVoice = voices.find(v => 
-          v.language.toLowerCase().replace('_', '-').startsWith('en-in')
-        );
-        if (inVoice) {
-          setIndianVoice(inVoice.identifier);
-          console.log('Selected Indian Voice:', inVoice.name, inVoice.identifier);
+      let retryAttempts = 0;
+      const tryLoad = async () => {
+        try {
+          const voices = await Speech.getVoicesAsync();
+          if (voices && voices.length > 0) {
+            const inVoice = voices.find(v => {
+              const lang = v.language.toLowerCase().replace('_', '-');
+              return lang === 'en-in' || lang.startsWith('en-in') || v.name.toLowerCase().includes('india') || v.name.toLowerCase().includes('en-in');
+            });
+            if (inVoice) {
+              setIndianVoice(inVoice.identifier);
+              setIsIndianVoiceAvailable(true);
+              console.log('Selected Indian Voice:', inVoice.name, inVoice.identifier);
+              return true;
+            }
+          }
+          return false;
+        } catch (err) {
+          console.log('Error loading voices:', err);
+          return false;
         }
-      } catch (err) {
-        console.log('Error loading voices:', err);
+      };
+
+      let success = await tryLoad();
+      if (!success) {
+        const intervalId = setInterval(async () => {
+          retryAttempts++;
+          const ok = await tryLoad();
+          if (ok) {
+            clearInterval(intervalId);
+          } else if (retryAttempts >= 5) {
+            clearInterval(intervalId);
+            setIsIndianVoiceAvailable(false);
+            console.log('No Indian English Voice found. Displaying tip banner.');
+          }
+        }, 800);
       }
     };
     loadVoices();
@@ -453,6 +479,18 @@ export default function PracticeScreen() {
             {feedback !== null ? 'Next Word →' : (isPronunciationMode ? 'Check Pronunciation' : 'Submit')}
           </Text>
         </TouchableOpacity>
+
+        {!isIndianVoiceAvailable && (
+          <View style={styles.voiceWarningCard}>
+            <Text style={styles.voiceWarningTitle}>💡 Tip for Parents & Teachers</Text>
+            <Text style={styles.voiceWarningText}>
+              For a clear, authentic Indian English voice, download the free "English (India)" TTS package in your phone settings:
+            </Text>
+            <Text style={styles.voiceWarningSteps}>
+              Settings ➔ System ➔ Languages ➔ Text-to-speech output ➔ Tap gear icon next to Preferred engine ➔ Install voice data ➔ English (India).
+            </Text>
+          </View>
+        )}
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -483,7 +521,40 @@ const styles = StyleSheet.create({
   iconLabelRecording: { color: '#EF4444' },
   inputContainer: { width: '100%', marginBottom: 32 },
   input: { backgroundColor: '#FFF', borderWidth: 2, borderColor: '#3B82F6', borderRadius: 16, padding: 20, fontSize: 24, fontFamily: 'PlusJakartaSans_700Bold', color: '#1E293B', textAlign: 'center', shadowColor: '#3B82F6', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 4, elevation: 2 },
-  submitButton: { backgroundColor: '#22C55E', width: '100%', padding: 20, borderRadius: 16, alignItems: 'center', shadowColor: '#22C55E', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 4, marginBottom: 40 },
+  submitButton: { backgroundColor: '#22C55E', width: '100%', padding: 20, borderRadius: 16, alignItems: 'center', shadowColor: '#22C55E', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 4, marginBottom: 20 },
   submitButtonDisabled: { backgroundColor: '#94A3B8', shadowOpacity: 0, elevation: 0 },
   submitButtonText: { color: '#FFF', fontFamily: 'PlusJakartaSans_800ExtraBold', fontSize: 20 },
+  voiceWarningCard: {
+    backgroundColor: '#FEF3C7',
+    borderWidth: 2,
+    borderColor: '#F59E0B',
+    borderRadius: 20,
+    padding: 20,
+    marginTop: 10,
+    marginBottom: 40,
+    shadowColor: '#F59E0B',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  voiceWarningTitle: {
+    fontFamily: 'PlusJakartaSans_800ExtraBold',
+    fontSize: 16,
+    color: '#92400E',
+    marginBottom: 8,
+  },
+  voiceWarningText: {
+    fontFamily: 'PlusJakartaSans_600SemiBold',
+    fontSize: 14,
+    color: '#92400E',
+    lineHeight: 20,
+    marginBottom: 8,
+  },
+  voiceWarningSteps: {
+    fontFamily: 'PlusJakartaSans_500Medium',
+    fontSize: 12,
+    color: '#B45309',
+    lineHeight: 18,
+  },
 });
