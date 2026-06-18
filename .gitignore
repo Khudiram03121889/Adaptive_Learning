@@ -6,6 +6,9 @@ backend/.env.*
 backend/.venv
 backend/venv/
 backend/__pycache__/
+backend/user_sessions.json
+backend/test_out.txt
+test_out.txt
 
 # Frontend
 frontend/node_modules/

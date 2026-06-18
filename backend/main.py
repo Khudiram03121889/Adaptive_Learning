@@ -5,8 +5,14 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
+from postgrest.exceptions import APIError
+import hashlib
 from datetime import datetime
-from openai import OpenAI
+from google import genai
+from google.genai import types
+from fastapi.responses import StreamingResponse
+from gtts import gTTS
+import io
 import asyncio
 import threading
 import random
@@ -24,17 +30,17 @@ app.add_middleware(
 )
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://xyz.supabase.co")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "dummy-key")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", os.environ.get("SUPABASE_KEY", "dummy-key"))
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 except Exception:
     supabase = None
 
-NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY", "dummy-api-key")
-openai_client = OpenAI(
-  base_url = "https://integrate.api.nvidia.com/v1",
-  api_key = NVIDIA_API_KEY
-)
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "dummy-api-key")
+try:
+    gemini_client = genai.Client(api_key=GOOGLE_API_KEY)
+except Exception:
+    gemini_client = None
 
 class Attempt(BaseModel):
     user_id: str
@@ -49,6 +55,95 @@ class SessionData(BaseModel):
     user_id: str
     attempts: list[Attempt]
     level: int = 1
+
+
+
+class RegisterRequest(BaseModel):
+    username: str
+    name: str
+    password: str
+    avatar: str
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return hash_password(plain_password) == hashed_password
+
+def require_supabase():
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured or connected")
+    return supabase
+
+@app.post("/register")
+def register_student(req: RegisterRequest):
+    db = require_supabase()
+    try:
+        response = db.table("students").select("id").eq("username", req.username).execute()
+        if hasattr(response, 'data') and response.data:
+            raise HTTPException(status_code=400, detail="Username already exists")
+
+        password_hash = hash_password(req.password)
+        insert_data = {
+            "username": req.username,
+            "name": req.name,
+            "password_hash": password_hash,
+            "avatar": req.avatar,
+            "level": 1
+        }
+        res = db.table("students").insert(insert_data).execute()
+        if hasattr(res, 'data') and res.data:
+            student = res.data[0]
+            return {
+                "id": student["id"],
+                "username": student["username"],
+                "name": student["name"],
+                "avatar": student["avatar"],
+                "level": student["level"]
+            }
+        raise HTTPException(status_code=500, detail="Failed to register student")
+    except APIError as e:
+        error_message = e.message if hasattr(e, 'message') else str(e)
+        if "row-level security" in str(error_message).lower() or "42501" in str(error_message):
+             raise HTTPException(status_code=500, detail="Database access blocked (RLS). Server requires Supabase Service Role Key.")
+        raise HTTPException(status_code=500, detail=f"Database error: {error_message}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to register student: {str(e)}")
+
+@app.post("/login")
+def login_student(req: LoginRequest):
+    db = require_supabase()
+    try:
+        response = db.table("students").select("*").eq("username", req.username).execute()
+        if not hasattr(response, 'data') or not response.data:
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+
+        student = response.data[0]
+        if not verify_password(req.password, student["password_hash"]):
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+
+        return {
+            "id": student["id"],
+            "username": student["username"],
+            "name": student["name"],
+            "avatar": student["avatar"],
+            "level": student["level"]
+        }
+    except APIError as e:
+        error_message = e.message if hasattr(e, 'message') else str(e)
+        if "row-level security" in str(error_message).lower() or "42501" in str(error_message):
+             raise HTTPException(status_code=500, detail="Database access blocked (RLS). Server requires Supabase Service Role Key.")
+        raise HTTPException(status_code=500, detail=f"Database error: {error_message}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to login: {str(e)}")
 
 # In-memory mock storage for demo purposes
 MOCK_100_WORDS = [
@@ -88,8 +183,8 @@ def get_user_state(user_id: str) -> dict:
 
 def generate_initial_words_sync():
     global MOCK_100_WORDS
-    if NVIDIA_API_KEY == "dummy-api-key" or not NVIDIA_API_KEY:
-        print("NVIDIA_API_KEY is not set. Using fallback MOCK words.")
+    if GOOGLE_API_KEY == "dummy-api-key" or not GOOGLE_API_KEY or gemini_client is None:
+        print("GOOGLE_API_KEY is not set. Using fallback MOCK words.")
         return
 
     prompt = """
@@ -99,19 +194,20 @@ def generate_initial_words_sync():
     Return ONLY a JSON array of 100 strings (e.g. ["cat", "dog", ...]). Do not include any other text or markdown.
     """
     try:
-        completion = openai_client.chat.completions.create(
-            model="minimaxai/minimax-m2.7",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=2048,
-            stream=False
+        response = gemini_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.7,
+                response_mime_type="application/json"
+            )
         )
-        response_text = completion.choices[0].message.content.strip()
+        response_text = response.text.strip()
         if response_text.startswith("```json"):
             response_text = response_text[7:-3].strip()
         elif response_text.startswith("```"):
             response_text = response_text[3:-3].strip()
-            
+
         words = json.loads(response_text)
         if isinstance(words, list) and len(words) >= 50:
             MOCK_100_WORDS = words
@@ -132,6 +228,24 @@ def startup_event():
 @app.get("/")
 def read_root():
     return {"message": "Welcome to the Adaptive Literacy App API", "supabase_connected": supabase is not None}
+
+@app.get("/tts")
+def generate_tts(word: str, lang: str = 'en-US'):
+    tld_map = {
+        'en-US': 'com',
+        'en-GB': 'co.uk',
+        'en-IN': 'co.in'
+    }
+    tld = tld_map.get(lang, 'com')
+    try:
+        tts = gTTS(text=word, lang='en', tld=tld)
+        fp = io.BytesIO()
+        tts.write_to_fp(fp)
+        fp.seek(0)
+        return StreamingResponse(fp, media_type="audio/mpeg")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/words")
 def get_words(user_id: str = "default_student", level: int = 1):
@@ -189,8 +303,8 @@ def background_analyze_and_prepare(session: SessionData):
         ]
     }
 
-    if NVIDIA_API_KEY == "dummy-api-key" or not NVIDIA_API_KEY:
-        print("Warning: NVIDIA_API_KEY is not set. Using local offline pool rotation for next words.")
+    if GOOGLE_API_KEY == "dummy-api-key" or not GOOGLE_API_KEY or gemini_client is None:
+        print("Warning: GOOGLE_API_KEY is not set. Using local offline pool rotation for next words.")
         fallback_pool = level_fallbacks.get(next_level, level_fallbacks[1])
         state["next_words"] = random.sample(fallback_pool, min(50, len(fallback_pool)))
         state["latest_analysis"]["mastery_percentage"] = mastery_percentage
@@ -251,60 +365,50 @@ def background_analyze_and_prepare(session: SessionData):
     Ensure next_50_words has exactly 50 words in a flat array of strings.
     """
 
-    # We try multiple available models in sequence to prevent API failures
-    models_to_try = [
-        "meta/llama-3.1-70b-instruct",
-        "nvidia/llama-3.1-nemotron-70b-instruct",
-        "minimaxai/minimax-m2.7"
-    ]
-    
     success = False
-    for model_name in models_to_try:
-        try:
-            print(f"Trying to call NVIDIA NIM using model: {model_name}")
-            completion = openai_client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt}],
+    try:
+        print(f"Trying to call Google Gemini API")
+        response = gemini_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
                 temperature=0.7,
                 top_p=0.95,
-                max_tokens=2048,
-                stream=False
+                response_mime_type="application/json"
             )
-            response_text = completion.choices[0].message.content.strip()
+        )
+        response_text = response.text.strip()
             
-            # Clean up response if it contains markdown formatting
-            if response_text.startswith("```json"):
-                response_text = response_text[7:-3].strip()
-            elif response_text.startswith("```"):
-                response_text = response_text[3:-3].strip()
-                
-            analysis_data = json.loads(response_text)
+        # Clean up response if it contains markdown formatting
+        if response_text.startswith("```json"):
+            response_text = response_text[7:-3].strip()
+        elif response_text.startswith("```"):
+            response_text = response_text[3:-3].strip()
             
-            # Update user state from successful completion
-            state["latest_analysis"]["mastery_percentage"] = analysis_data.get("mastery_percentage", mastery_percentage)
-            state["latest_analysis"]["mastered_words"] = correct_words[:10] # Show up to 10 mastered
-            state["latest_analysis"]["patterns_to_practice"] = analysis_data.get("patterns_to_practice", [])
-            
-            next_words = analysis_data.get("next_50_words", [])
-            if len(next_words) >= 10:
-                state["next_words"] = next_words[:50]
-                # Fill to 50 if generated list is short
-                while len(state["next_words"]) < 50:
-                    state["next_words"].append(random.choice(level_fallbacks.get(next_level, level_fallbacks[1])))
+        analysis_data = json.loads(response_text)
+
+        # Update user state from successful completion
+        state["latest_analysis"]["mastery_percentage"] = analysis_data.get("mastery_percentage", mastery_percentage)
+        state["latest_analysis"]["mastered_words"] = correct_words[:10] # Show up to 10 mastered
+        state["latest_analysis"]["patterns_to_practice"] = analysis_data.get("patterns_to_practice", [])
+
+        next_words = analysis_data.get("next_50_words", [])
+        if len(next_words) >= 10:
+            state["next_words"] = next_words[:50]
+            # Fill to 50 if generated list is short
+            while len(state["next_words"]) < 50:
+                state["next_words"].append(random.choice(level_fallbacks.get(next_level, level_fallbacks[1])))
             else:
                 fallback_pool = level_fallbacks.get(next_level, level_fallbacks[1])
                 state["next_words"] = random.sample(fallback_pool, min(50, len(fallback_pool)))
                 
-            print(f"Successfully analyzed session and prepared next 50 words using model {model_name}.")
-            success = True
-            break
-            
-        except Exception as e:
-            print(f"Model {model_name} failed: {e}")
-            continue
+        print(f"Successfully analyzed session and prepared next 50 words using Google Gemini.")
+        success = True
+    except Exception as e:
+        print(f"Google Gemini failed: {e}")
 
     if not success:
-        print("All NVIDIA NIM models failed. Using local offline pool fallback.")
+        print("Google Gemini API failed. Using local offline pool fallback.")
         fallback_pool = level_fallbacks.get(next_level, level_fallbacks[1])
         state["next_words"] = random.sample(fallback_pool, min(50, len(fallback_pool)))
         state["latest_analysis"]["mastery_percentage"] = mastery_percentage

@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: adaptive-literacy-backend
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: cd backend && pip install -r requirements.txt
+    startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
