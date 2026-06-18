@@ -9,7 +9,11 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSSpeechRecognitionUsageDescription": "Allow Adaptive Literacy App to analyze your speech.",
+        "NSMicrophoneUsageDescription": "Allow Adaptive Literacy App to access your microphone for pronunciation."
+      }
     },
     "android": {
       "package": "com.adaptiveliteracy.app",
@@ -20,7 +24,10 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "output": "static",
@@ -46,6 +53,14 @@
           "microphonePermission": "Allow Adaptive Literacy App to access your microphone for pronunciation.",
           "speechRecognitionPermission": "Allow Adaptive Literacy App to analyze your speech."
         }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
       ]
     ],
     "experiments": {
@@ -53,9 +68,11 @@
       "reactCompiler": true
     },
     "extra": {
+      "router": {},
       "eas": {
         "projectId": "2f38b930-ec94-4c25-a01e-02566e3859d0"
       }
-    }
+    },
+    "owner": "sameer_28091907"
   }
 }

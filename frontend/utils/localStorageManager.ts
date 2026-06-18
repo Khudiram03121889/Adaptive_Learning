@@ -2,11 +2,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export interface Student {
   id: string;
+  username: string;
   name: string;
-  pin: string;
   avatar: string;
   level: number;
-  createdAt: string;
 }
 
 export interface StudentAttempt {
@@ -20,11 +19,23 @@ export interface StudentAttempt {
   timestamp: string;
 }
 
+export interface TestSession {
+  id: string;
+  timestamp: string;
+  level: number;
+  mode: 'spelling' | 'pronunciation';
+  totalWords: number;
+  correctCount: number;
+  wrongCount: number;
+  masteryPercentage: number;
+  attempts: StudentAttempt[];
+}
+
 const KEYS = {
-  STUDENTS: 'adaptive_literacy_students_v1',
-  ACTIVE_STUDENT_ID: 'adaptive_literacy_active_id_v1',
+  ACTIVE_STUDENT: 'adaptive_literacy_active_student_v2',
   ATTEMPTS: 'adaptive_literacy_attempts_v1',
   CACHED_WORDS: 'adaptive_literacy_cached_words_v1',
+  SESSIONS: 'adaptive_literacy_sessions_v2',
 };
 
 export class LocalStorageManager {
@@ -38,97 +49,34 @@ export class LocalStorageManager {
     { emoji: '🐸', name: 'Frog', bg: '#DCFCE7' },
   ];
 
-  // 1. Fetch all students
-  static async getStudents(): Promise<Student[]> {
-    try {
-      const data = await AsyncStorage.getItem(KEYS.STUDENTS);
-      return data ? JSON.parse(data) : [];
-    } catch (e) {
-      console.log('Error getting students:', e);
-      return [];
-    }
+  // 1. Set Active Student (Save profile returned from backend)
+  static async setActiveStudent(student: Student): Promise<void> {
+    await AsyncStorage.setItem(KEYS.ACTIVE_STUDENT, JSON.stringify(student));
   }
 
-  // 2. Register a new student
-  static async registerStudent(name: string, pin: string, avatar: string): Promise<Student | null> {
-    try {
-      const students = await this.getStudents();
-      
-      // Check if student name already exists
-      const exists = students.some(s => s.name.toLowerCase() === name.toLowerCase().trim());
-      if (exists) {
-        return null; // Username already exists
-      }
-
-      const newStudent: Student = {
-        id: `student_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        name: name.trim(),
-        pin: pin.trim(),
-        avatar,
-        level: 1,
-        createdAt: new Date().toISOString(),
-      };
-
-      students.push(newStudent);
-      await AsyncStorage.setItem(KEYS.STUDENTS, JSON.stringify(students));
-      return newStudent;
-    } catch (e) {
-      console.log('Error registering student:', e);
-      return null;
-    }
-  }
-
-  // 3. Authenticate / Login Student
-  static async login(name: string, pin: string): Promise<Student | null> {
-    try {
-      const students = await this.getStudents();
-      const student = students.find(
-        s => s.name.toLowerCase() === name.toLowerCase().trim() && s.pin === pin.trim()
-      );
-
-      if (student) {
-        await AsyncStorage.setItem(KEYS.ACTIVE_STUDENT_ID, student.id);
-        return student;
-      }
-      return null;
-    } catch (e) {
-      console.log('Error during student login:', e);
-      return null;
-    }
-  }
-
-  // 4. Set Active Student directly (e.g. from profile picker)
-  static async setActiveStudentId(studentId: string): Promise<void> {
-    await AsyncStorage.setItem(KEYS.ACTIVE_STUDENT_ID, studentId);
-  }
-
-  // 5. Get Active Student profile
+  // 2. Get Active Student profile
   static async getActiveStudent(): Promise<Student | null> {
     try {
-      const id = await AsyncStorage.getItem(KEYS.ACTIVE_STUDENT_ID);
-      if (!id) return null;
-
-      const students = await this.getStudents();
-      return students.find(s => s.id === id) || null;
+      const data = await AsyncStorage.getItem(KEYS.ACTIVE_STUDENT);
+      return data ? JSON.parse(data) : null;
     } catch (e) {
       console.log('Error getting active student:', e);
       return null;
     }
   }
 
-  // 6. Logout
+  // 3. Logout
   static async logout(): Promise<void> {
-    await AsyncStorage.removeItem(KEYS.ACTIVE_STUDENT_ID);
+    await AsyncStorage.removeItem(KEYS.ACTIVE_STUDENT);
   }
 
-  // 7. Update Student Level
+  // 4. Update Student Level Locally
   static async updateStudentLevel(studentId: string, level: number): Promise<void> {
     try {
-      const students = await this.getStudents();
-      const idx = students.findIndex(s => s.id === studentId);
-      if (idx !== -1) {
-        students[idx].level = level;
-        await AsyncStorage.setItem(KEYS.STUDENTS, JSON.stringify(students));
+      const student = await this.getActiveStudent();
+      if (student && student.id === studentId) {
+        student.level = level;
+        await this.setActiveStudent(student);
       }
     } catch (e) {
       console.log('Error updating student level:', e);
@@ -184,6 +132,98 @@ export class LocalStorageManager {
     } catch (e) {
       console.log('Error getting cached words:', e);
       return null;
+    }
+  }
+
+  // 12. Save structured test session
+  static async saveTestSession(studentId: string, session: TestSession): Promise<void> {
+    try {
+      const current = await this.getTestSessions(studentId);
+      const combined = [session, ...current]; // Store newest first
+      
+      const allData = await AsyncStorage.getItem(KEYS.SESSIONS);
+      const db = allData ? JSON.parse(allData) : {};
+      
+      db[studentId] = combined;
+      await AsyncStorage.setItem(KEYS.SESSIONS, JSON.stringify(db));
+    } catch (e) {
+      console.log('Error saving test session:', e);
+    }
+  }
+
+  // 13. Get all test sessions for a student
+  static async getTestSessions(studentId: string): Promise<TestSession[]> {
+    try {
+      // First, run migration to ensure any old flat attempts are partitioned into structured sessions
+      await this.migrateFlatAttemptsToSessions(studentId);
+
+      const allData = await AsyncStorage.getItem(KEYS.SESSIONS);
+      const db = allData ? JSON.parse(allData) : {};
+      return db[studentId] || [];
+    } catch (e) {
+      console.log('Error getting test sessions:', e);
+      return [];
+    }
+  }
+
+  // 14. Schema migration: partition legacy flat attempts into structured sessions
+  static async migrateFlatAttemptsToSessions(studentId: string): Promise<void> {
+    try {
+      const allSessionsData = await AsyncStorage.getItem(KEYS.SESSIONS);
+      const sessionsDb = allSessionsData ? JSON.parse(allSessionsData) : {};
+      
+      // If student already has structured sessions, no need to migrate!
+      if (sessionsDb[studentId] && sessionsDb[studentId].length > 0) {
+        return;
+      }
+
+      // Load flat attempts
+      const flatAttempts = await this.getAttempts(studentId);
+      if (!flatAttempts || flatAttempts.length === 0) {
+        return; // Nothing to migrate!
+      }
+
+      console.log(`Migrating ${flatAttempts.length} legacy attempts for student ${studentId}...`);
+
+      // Sort flat attempts chronologically
+      const sorted = [...flatAttempts].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      
+      // We will partition the attempts into chunks of 50 (or less for the last batch)
+      const migratedSessions: TestSession[] = [];
+      const chunkSize = 50;
+
+      for (let i = 0; i < sorted.length; i += chunkSize) {
+        const chunk = sorted.slice(i, i + chunkSize);
+        if (chunk.length === 0) continue;
+
+        const correctCount = chunk.filter(a => a.correct).length;
+        const totalCount = chunk.length;
+        const masteryPercentage = Math.round((correctCount / totalCount) * 100);
+        
+        const inferredLevel = 1; // Default fallback
+        const inferredMode = chunk[0].mode || 'spelling';
+        const timestamp = chunk[chunk.length - 1].timestamp || new Date().toISOString();
+
+        const newSession: TestSession = {
+          id: `migrated_session_${Date.now()}_${i}`,
+          timestamp: timestamp,
+          level: inferredLevel,
+          mode: inferredMode,
+          totalWords: totalCount,
+          correctCount: correctCount,
+          wrongCount: totalCount - correctCount,
+          masteryPercentage: masteryPercentage,
+          attempts: chunk
+        };
+
+        migratedSessions.unshift(newSession); // Newest first
+      }
+
+      sessionsDb[studentId] = migratedSessions;
+      await AsyncStorage.setItem(KEYS.SESSIONS, JSON.stringify(sessionsDb));
+      console.log(`Successfully migrated ${migratedSessions.length} sessions for student ${studentId}.`);
+    } catch (e) {
+      console.log('Error during flat attempts migration:', e);
     }
   }
 }

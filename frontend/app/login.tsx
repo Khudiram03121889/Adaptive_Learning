@@ -4,19 +4,60 @@ import { useRouter } from 'expo-router';
 import { useFonts, PlusJakartaSans_400Regular, PlusJakartaSans_500Medium, PlusJakartaSans_600SemiBold, PlusJakartaSans_700Bold, PlusJakartaSans_800ExtraBold } from '@expo-google-fonts/plus-jakarta-sans';
 import { LocalStorageManager, Student } from '../utils/localStorageManager';
 
+const getApiUrl = () => {
+  return 'https://adaptive-literacy-backend.onrender.com';
+};
+
+const API_URL = getApiUrl();
+const SERVER_WAKE_TIMEOUT_MS = 70000;
+const REQUEST_TIMEOUT_MS = 45000;
+
+let serverWarmPromise: Promise<void> | null = null;
+
+const fetchWithTimeout = async (url: string, options: RequestInit = {}, timeoutMs = REQUEST_TIMEOUT_MS) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
+const ensureServerAwake = async () => {
+  if (!serverWarmPromise) {
+    serverWarmPromise = fetchWithTimeout(`${API_URL}/`, {}, SERVER_WAKE_TIMEOUT_MS)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Backend health check failed with status ${response.status}`);
+        }
+      })
+      .catch((error) => {
+        serverWarmPromise = null;
+        throw error;
+      });
+  }
+
+  return serverWarmPromise;
+};
+
 export default function LoginScreen() {
   const router = useRouter();
-  const [students, setStudents] = useState<Student[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
   const [isRegistering, setIsRegistering] = useState(false);
 
   // Login Form States
-  const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
-  const [pinInput, setPinInput] = useState('');
+  const [loginUsername, setLoginUsername] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
 
   // Registration Form States
   const [regName, setRegName] = useState('');
-  const [regPin, setRegPin] = useState('');
+  const [regUsername, setRegUsername] = useState('');
+  const [regPassword, setRegPassword] = useState('');
   const [selectedAvatar, setSelectedAvatar] = useState(LocalStorageManager.AVATARS[0].emoji);
 
   const [fontsLoaded] = useFonts({
@@ -28,58 +69,83 @@ export default function LoginScreen() {
   });
 
   useEffect(() => {
-    loadStudents();
+    ensureServerAwake().catch((error) => {
+      console.log('Backend wake-up check failed:', error);
+    });
   }, []);
 
-  const loadStudents = async () => {
-    setIsLoading(true);
-    const list = await LocalStorageManager.getStudents();
-    setStudents(list);
-    setIsLoading(false);
-  };
-
   const handleRegister = async () => {
-    if (!regName.trim() || !regPin.trim()) {
-      Alert.alert('Details Needed', 'Please enter a name and a PIN/Password.');
-      return;
-    }
-
-    if (regPin.trim().length < 4) {
-      Alert.alert('Weak Password', 'PIN/Password must be at least 4 digits/characters.');
+    if (!regName.trim() || !regUsername.trim() || !regPassword.trim()) {
+      Alert.alert('Details Needed', 'Please fill in all fields.');
       return;
     }
 
     setIsLoading(true);
-    const newStudent = await LocalStorageManager.registerStudent(regName, regPin, selectedAvatar);
-    setIsLoading(false);
-
-    if (newStudent) {
-      Alert.alert('Registration Successful 🎉', `Welcome to your learning room, ${newStudent.name}!`);
-      // Reset forms
-      setRegName('');
-      setRegPin('');
-      setIsRegistering(false);
-      loadStudents();
-    } else {
-      Alert.alert('Name Taken', 'A student profile with this name already exists. Please choose a different name.');
+    try {
+      await ensureServerAwake();
+      const response = await fetchWithTimeout(`${API_URL}/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: regUsername.trim().toLowerCase(),
+          name: regName.trim(),
+          password: regPassword,
+          avatar: selectedAvatar
+        })
+      });
+      
+      const data = await response.json();
+      
+      if (!response.ok) {
+        Alert.alert('Registration Failed', data.detail || 'Something went wrong.');
+      } else {
+        Alert.alert('Registration Successful 🎉', `Welcome, ${data.name}!`);
+        await LocalStorageManager.setActiveStudent(data);
+        router.replace('/(tabs)');
+      }
+    } catch (e) {
+      console.log('Registration network error:', e);
+      Alert.alert('Network Error', 'Could not reach the Render backend. If this is the first try after some time, wait a minute and try again.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
   const handleLoginSubmit = async () => {
-    if (!selectedStudent) return;
+    if (!loginUsername.trim() || !loginPassword.trim()) {
+      Alert.alert('Details Needed', 'Please enter both username and password.');
+      return;
+    }
 
-    if (pinInput.trim() === selectedStudent.pin) {
-      await LocalStorageManager.setActiveStudentId(selectedStudent.id);
-      setPinInput('');
-      setSelectedStudent(null);
-      router.replace('/(tabs)');
-    } else {
-      Alert.alert('Incorrect PIN ⚠️', 'The PIN/Password entered is incorrect. Please try again.');
-      setPinInput('');
+    setIsLoading(true);
+    try {
+      await ensureServerAwake();
+      const response = await fetchWithTimeout(`${API_URL}/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: loginUsername.trim().toLowerCase(),
+          password: loginPassword
+        })
+      });
+      
+      const data = await response.json();
+      
+      if (!response.ok) {
+        Alert.alert('Login Failed', data.detail || 'Incorrect username or password.');
+      } else {
+        await LocalStorageManager.setActiveStudent(data);
+        router.replace('/(tabs)');
+      }
+    } catch (e) {
+      console.log('Login network error:', e);
+      Alert.alert('Network Error', 'Could not reach the Render backend. If this is the first try after some time, wait a minute and try again.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  if (!fontsLoaded || isLoading) {
+  if (!fontsLoaded) {
     return (
       <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
         <ActivityIndicator size="large" color="#3B82F6" />
@@ -101,100 +167,68 @@ export default function LoginScreen() {
           <Text style={styles.appSubtitle}>Your personal reading & writing tutor</Text>
         </View>
 
-        {/* 1. Normal State: List of Students / Select Profile */}
-        {!isRegistering && !selectedStudent && (
+        {/* 1. Normal State: Login */}
+        {!isRegistering && (
           <View style={styles.content}>
-            <Text style={styles.title}>Who is learning today?</Text>
+            <Text style={styles.title}>Welcome Back!</Text>
             
-            {students.length > 0 ? (
-              <View style={styles.grid}>
-                {students.map((student) => {
-                  const avatarConfig = LocalStorageManager.AVATARS.find(a => a.emoji === student.avatar) || LocalStorageManager.AVATARS[0];
-                  return (
-                    <TouchableOpacity 
-                      key={student.id} 
-                      style={[styles.profileCard, { backgroundColor: avatarConfig.bg }]}
-                      onPress={() => setSelectedStudent(student)}
-                    >
-                      <Text style={styles.profileEmoji}>{student.avatar}</Text>
-                      <Text style={styles.profileName}>{student.name}</Text>
-                      <Text style={styles.profileLevel}>Level {student.level}</Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            ) : (
-              <View style={styles.emptyContainer}>
-                <Text style={styles.emptyText}>No student profiles registered yet.</Text>
-                <Text style={styles.emptySubtitle}>Tap the button below to register a profile and get started!</Text>
-              </View>
-            )}
+            <View style={styles.cardContainer}>
+              <Text style={styles.formLabel}>Username:</Text>
+              <TextInput
+                style={[styles.input, { textAlign: 'left', paddingHorizontal: 16 }]}
+                value={loginUsername}
+                onChangeText={setLoginUsername}
+                placeholder="Enter username"
+                placeholderTextColor="#94A3B8"
+                autoCapitalize="none"
+              />
+
+              <Text style={styles.formLabel}>Password:</Text>
+              <TextInput
+                style={[styles.input, { textAlign: 'left', paddingHorizontal: 16 }]}
+                value={loginPassword}
+                onChangeText={setLoginPassword}
+                placeholder="Enter password"
+                placeholderTextColor="#94A3B8"
+                secureTextEntry={true}
+              />
+
+              {isLoading ? (
+                <ActivityIndicator size="large" color="#3B82F6" style={{ marginVertical: 20 }} />
+              ) : (
+                <TouchableOpacity 
+                  style={styles.submitButton}
+                  onPress={handleLoginSubmit}
+                >
+                  <Text style={styles.submitButtonText}>Enter Study Room →</Text>
+                </TouchableOpacity>
+              )}
+            </View>
 
             <TouchableOpacity 
               style={styles.registerToggle}
               onPress={() => setIsRegistering(true)}
             >
-              <Text style={styles.registerToggleText}>+ Register New Student</Text>
+              <Text style={styles.registerToggleText}>+ Register New Account</Text>
             </TouchableOpacity>
           </View>
         )}
 
-        {/* 2. State: Student Selected (Enter Password/PIN) */}
-        {selectedStudent && (
-          <View style={styles.content}>
-            <TouchableOpacity 
-              style={styles.backButton}
-              onPress={() => {
-                setSelectedStudent(null);
-                setPinInput('');
-              }}
-            >
-              <Text style={styles.backButtonText}>← Change Profile</Text>
-            </TouchableOpacity>
-
-            <Text style={styles.title}>Welcome back, {selectedStudent.name}!</Text>
-            <Text style={styles.subtitle}>Please enter your PIN / Password to enter:</Text>
-
-            <View style={styles.cardContainer}>
-              <Text style={styles.avatarBig}>{selectedStudent.avatar}</Text>
-              
-              <TextInput
-                style={styles.input}
-                value={pinInput}
-                onChangeText={setPinInput}
-                placeholder="Enter 4-digit PIN"
-                placeholderTextColor="#94A3B8"
-                secureTextEntry={true}
-                keyboardType="numeric"
-                maxLength={8}
-              />
-
-              <TouchableOpacity 
-                style={styles.submitButton}
-                onPress={handleLoginSubmit}
-              >
-                <Text style={styles.submitButtonText}>Enter Study Room →</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
-
-        {/* 3. State: Registration Form */}
+        {/* 2. State: Registration Form */}
         {isRegistering && (
           <View style={styles.content}>
             <TouchableOpacity 
               style={styles.backButton}
               onPress={() => setIsRegistering(false)}
             >
-              <Text style={styles.backButtonText}>← Back to Profile Picker</Text>
+              <Text style={styles.backButtonText}>← Back to Login</Text>
             </TouchableOpacity>
 
-            <Text style={styles.title}>Register a New Student</Text>
-            <Text style={styles.subtitle}>Create a personal workspace for spelling & reading progress</Text>
+            <Text style={styles.title}>Register a New Account</Text>
+            <Text style={styles.subtitle}>Create your cloud-synced profile!</Text>
 
             <View style={styles.cardContainer}>
               
-              {/* Select Avatar emoji */}
               <Text style={styles.formLabel}>Choose your Avatar:</Text>
               <View style={styles.avatarRow}>
                 {LocalStorageManager.AVATARS.map((av) => (
@@ -212,34 +246,46 @@ export default function LoginScreen() {
                 ))}
               </View>
 
-              <Text style={styles.formLabel}>Student Name:</Text>
+              <Text style={styles.formLabel}>Display Name:</Text>
               <TextInput
                 style={[styles.input, { textAlign: 'left', paddingHorizontal: 16 }]}
                 value={regName}
                 onChangeText={setRegName}
-                placeholder="Enter Student Name"
+                placeholder="e.g. John"
                 placeholderTextColor="#94A3B8"
                 autoCapitalize="words"
               />
 
-              <Text style={styles.formLabel}>Set PIN/Password (4 digits):</Text>
+              <Text style={styles.formLabel}>Username:</Text>
               <TextInput
                 style={[styles.input, { textAlign: 'left', paddingHorizontal: 16 }]}
-                value={regPin}
-                onChangeText={setRegPin}
-                placeholder="Enter 4-digit PIN"
+                value={regUsername}
+                onChangeText={setRegUsername}
+                placeholder="e.g. john123"
                 placeholderTextColor="#94A3B8"
-                secureTextEntry={true}
-                keyboardType="numeric"
-                maxLength={8}
+                autoCapitalize="none"
               />
 
-              <TouchableOpacity 
-                style={[styles.submitButton, { backgroundColor: '#22C55E' }]}
-                onPress={handleRegister}
-              >
-                <Text style={styles.submitButtonText}>Create Profile 🎉</Text>
-              </TouchableOpacity>
+              <Text style={styles.formLabel}>Password:</Text>
+              <TextInput
+                style={[styles.input, { textAlign: 'left', paddingHorizontal: 16 }]}
+                value={regPassword}
+                onChangeText={setRegPassword}
+                placeholder="Enter password"
+                placeholderTextColor="#94A3B8"
+                secureTextEntry={true}
+              />
+
+              {isLoading ? (
+                <ActivityIndicator size="large" color="#22C55E" style={{ marginVertical: 20 }} />
+              ) : (
+                <TouchableOpacity 
+                  style={[styles.submitButton, { backgroundColor: '#22C55E' }]}
+                  onPress={handleRegister}
+                >
+                  <Text style={styles.submitButtonText}>Create Cloud Profile 🎉</Text>
+                </TouchableOpacity>
+              )}
             </View>
           </View>
         )}
@@ -261,24 +307,13 @@ const styles = StyleSheet.create({
   title: { fontFamily: 'PlusJakartaSans_800ExtraBold', fontSize: 24, color: '#1E293B', textAlign: 'center', marginBottom: 24 },
   subtitle: { fontFamily: 'PlusJakartaSans_500Medium', fontSize: 16, color: '#64748B', textAlign: 'center', marginBottom: 24 },
   
-  grid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 16, width: '100%', marginBottom: 32 },
-  profileCard: { width: 140, padding: 20, borderRadius: 24, alignItems: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.05, shadowRadius: 8, elevation: 2, borderWidth: 1, borderColor: '#FFF' },
-  profileEmoji: { fontSize: 48, marginBottom: 12 },
-  profileName: { fontFamily: 'PlusJakartaSans_700Bold', fontSize: 18, color: '#1E293B', textAlign: 'center', marginBottom: 4 },
-  profileLevel: { fontFamily: 'PlusJakartaSans_600SemiBold', fontSize: 12, color: '#64748B', backgroundColor: '#FFF', paddingHorizontal: 12, paddingVertical: 4, borderRadius: 100, overflow: 'hidden' },
-  
-  emptyContainer: { alignItems: 'center', padding: 24, backgroundColor: '#FFF', borderRadius: 24, borderStyle: 'dashed', borderWidth: 2, borderColor: '#CBD5E1', marginBottom: 32 },
-  emptyText: { fontFamily: 'PlusJakartaSans_700Bold', fontSize: 16, color: '#64748B', textAlign: 'center', marginBottom: 8 },
-  emptySubtitle: { fontFamily: 'PlusJakartaSans_500Medium', fontSize: 14, color: '#94A3B8', textAlign: 'center' },
-  
-  registerToggle: { alignSelf: 'center', padding: 12 },
+  registerToggle: { alignSelf: 'center', padding: 12, marginTop: 24 },
   registerToggleText: { fontFamily: 'PlusJakartaSans_700Bold', fontSize: 16, color: '#3B82F6' },
   
   backButton: { alignSelf: 'flex-start', padding: 12, marginBottom: 16 },
   backButtonText: { fontFamily: 'PlusJakartaSans_700Bold', fontSize: 16, color: '#3B82F6' },
   
   cardContainer: { backgroundColor: '#FFF', borderRadius: 28, padding: 28, shadowColor: '#000', shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.05, shadowRadius: 16, elevation: 3, width: '100%' },
-  avatarBig: { fontSize: 72, textAlign: 'center', marginBottom: 24 },
   input: { backgroundColor: '#F8FAFC', borderWidth: 2, borderColor: '#E2E8F0', borderRadius: 16, padding: 18, fontSize: 18, fontFamily: 'PlusJakartaSans_600SemiBold', color: '#1E293B', textAlign: 'center', marginBottom: 20 },
   submitButton: { backgroundColor: '#3B82F6', padding: 18, borderRadius: 16, alignItems: 'center', shadowColor: '#3B82F6', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 8, elevation: 3 },
   submitButtonText: { color: '#FFF', fontFamily: 'PlusJakartaSans_800ExtraBold', fontSize: 18 },

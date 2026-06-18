@@ -20,7 +20,7 @@ export default function HomeScreen() {
       const checkUser = async () => {
         const student = await LocalStorageManager.getActiveStudent();
         if (!student) {
-          router.replace('/login');
+          router.replace('/login' as any);
         } else {
           setActiveStudent(student);
         }
@@ -31,7 +31,7 @@ export default function HomeScreen() {
 
   const handleSwitchProfile = async () => {
     await LocalStorageManager.logout();
-    router.replace('/login');
+    router.replace('/login' as any);
   };
 
   const getLevelDesc = (lvl: number) => {
