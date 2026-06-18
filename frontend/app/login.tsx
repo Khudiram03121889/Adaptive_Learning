@@ -69,9 +69,8 @@ export default function LoginScreen() {
   });
 
   useEffect(() => {
-    ensureServerAwake().catch((error) => {
-      console.log('Backend wake-up check failed:', error);
-    });
+    // No longer calling ensureServerAwake here to prevent blocking on slow Render backend startup
+    // The server will be woken up by the first API call (login/register)
   }, []);
 
   const handleRegister = async () => {
@@ -82,7 +81,7 @@ export default function LoginScreen() {
 
     setIsLoading(true);
     try {
-      await ensureServerAwake();
+      // await ensureServerAwake(); // Removed to prevent blocking
       const response = await fetchWithTimeout(`${API_URL}/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -105,7 +104,7 @@ export default function LoginScreen() {
       }
     } catch (e) {
       console.log('Registration network error:', e);
-      Alert.alert('Network Error', 'Could not reach the Render backend. If this is the first try after some time, wait a minute and try again.');
+      Alert.alert('Network Error', 'Could not reach the Render backend. Please check your internet connection or try again after a minute.');
     } finally {
       setIsLoading(false);
     }
@@ -119,7 +118,7 @@ export default function LoginScreen() {
 
     setIsLoading(true);
     try {
-      await ensureServerAwake();
+      // await ensureServerAwake(); // Removed to prevent blocking
       const response = await fetchWithTimeout(`${API_URL}/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -139,7 +138,7 @@ export default function LoginScreen() {
       }
     } catch (e) {
       console.log('Login network error:', e);
-      Alert.alert('Network Error', 'Could not reach the Render backend. If this is the first try after some time, wait a minute and try again.');
+      Alert.alert('Network Error', 'Could not reach the Render backend. Please check your internet connection or try again after a minute.');
     } finally {
       setIsLoading(false);
     }
